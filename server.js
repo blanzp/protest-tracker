@@ -12,6 +12,7 @@ const DEFAULT_EVENT_DURATION_HOURS = process.env.DEFAULT_EVENT_DURATION_HOURS ||
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.static('public'));
 
 // WebSocket server for real-time updates
 const wss = new WebSocket.Server({ port: 8080 });

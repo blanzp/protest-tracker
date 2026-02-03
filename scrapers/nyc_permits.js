@@ -1,60 +1,17 @@
 const axios = require('axios');
-const { Pool } = require('pg');
 require('dotenv').config();
-
-const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'protest_tracker',
-  password: process.env.DB_PASSWORD || 'password',
-  port: process.env.DB_PORT || 5432,
-});
+const pool = require('../db/pool');
+const { categorizeEvent, isProtestEvent } = require('../utils/categorize');
+const { geocodeAddress } = require('../utils/geocoding');
+const { initializeDataSource, updateDataSourceSuccess, updateDataSourceError } = require('../utils/datasource_tracker');
 
 // NYC Open Data API endpoint for permitted events
 const NYC_PERMITS_URL = 'https://data.cityofnewyork.us/resource/tvpp-9vvx.json';
 
-// Keywords that suggest protests/demonstrations
-const PROTEST_KEYWORDS = [
-  'rally', 'demonstration', 'protest', 'march', 'vigil', 'strike',
-  'climate', 'abortion', 'immigration', 'rights', 'justice', 'action',
-  'solidarity', 'occupy', 'resist', 'movement', 'activist'
-];
-
-// Map event types to causes
-const CAUSE_MAPPING = {
-  'climate': ['climate', 'environment', 'earth day', 'green'],
-  'reproductive': ['abortion', 'reproductive', 'planned parenthood', 'roe'],
-  'immigration': ['immigration', 'ice', 'border', 'refugee', 'daca'],
-  'racial_justice': ['blm', 'black lives', 'racial', 'police', 'justice'],
-  'lgbtq': ['pride', 'lgbtq', 'gay', 'trans', 'gender'],
-  'labor': ['union', 'worker', 'strike', 'labor', 'wage'],
-  'political': ['election', 'vote', 'democrat', 'republican', 'trump', 'biden'],
-  'other': []
-};
-
-function categorizeEvent(eventName, description = '') {
-  const text = `${eventName} ${description}`.toLowerCase();
-  
-  for (const [cause, keywords] of Object.entries(CAUSE_MAPPING)) {
-    if (cause === 'other') continue;
-    
-    for (const keyword of keywords) {
-      if (text.includes(keyword)) {
-        return cause;
-      }
-    }
-  }
-  
-  return 'other';
-}
-
-function isProtestEvent(eventName, description = '') {
-  const text = `${eventName} ${description}`.toLowerCase();
-  
-  return PROTEST_KEYWORDS.some(keyword => text.includes(keyword));
-}
-
 async function scrapeNYCPermits() {
+  // Initialize data source tracking
+  await initializeDataSource('NYC Permits', 'permit', NYC_PERMITS_URL);
+
   try {
     console.log('🔍 Scraping NYC permits...');
     
@@ -86,18 +43,24 @@ async function scrapeNYCPermits() {
       }
       
       const cause = categorizeEvent(permit.event_name, permit.event_details);
-      
+
       // Try to extract coordinates (NYC data sometimes has lat/lng)
       let latitude = null, longitude = null;
-      
+
       if (permit.latitude && permit.longitude) {
         latitude = parseFloat(permit.latitude);
         longitude = parseFloat(permit.longitude);
       } else {
-        // Default to rough NYC coordinates if not available
-        // In production, you'd use a geocoding service
-        latitude = 40.7128;
-        longitude = -74.0060;
+        // Try geocoding the event location
+        const geocoded = await geocodeAddress(permit.event_location);
+        if (geocoded) {
+          latitude = geocoded.latitude;
+          longitude = geocoded.longitude;
+        } else {
+          // Fallback to NYC center coordinates
+          latitude = 40.7128;
+          longitude = -74.0060;
+        }
       }
       
       // Insert into database
@@ -140,9 +103,13 @@ async function scrapeNYCPermits() {
     }
     
     console.log(`🎯 Added ${protestCount} protest events from NYC permits`);
-    
+
+    // Update data source status to success
+    await updateDataSourceSuccess('NYC Permits');
+
   } catch (err) {
     console.error('❌ Error scraping NYC permits:', err.message);
+    await updateDataSourceError('NYC Permits', err.message);
     throw err;
   }
 }

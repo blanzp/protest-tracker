@@ -1,13 +1,5 @@
-const { Pool } = require('pg');
 require('dotenv').config();
-
-const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'protest_tracker',
-  password: process.env.DB_PASSWORD || 'password',
-  port: process.env.DB_PORT || 5432,
-});
+const pool = require('../db/pool');
 
 async function createTables() {
   try {
@@ -92,8 +84,20 @@ async function createTables() {
         url TEXT,
         last_scraped TIMESTAMP WITH TIME ZONE,
         status VARCHAR(20) DEFAULT 'active',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        error_message TEXT,
+        last_error_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
+    `);
+
+    // Add unique constraint on name if it doesn't exist
+    await pool.query(`
+      DO $$ BEGIN
+        ALTER TABLE data_sources ADD CONSTRAINT data_sources_name_unique UNIQUE (name);
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
     `);
     
     console.log('✅ Tables created successfully!');

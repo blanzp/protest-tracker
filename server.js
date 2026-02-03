@@ -1,20 +1,13 @@
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
 const WebSocket = require('ws');
+const cron = require('node-cron');
 require('dotenv').config();
+const pool = require('./db/pool');
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Database connection
-const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'protest_tracker',
-  password: process.env.DB_PASSWORD || 'password',
-  port: process.env.DB_PORT || 5432,
-});
+const DEFAULT_EVENT_DURATION_HOURS = process.env.DEFAULT_EVENT_DURATION_HOURS || 4;
 
 // Middleware
 app.use(cors());
@@ -30,6 +23,64 @@ function broadcast(data) {
       client.send(JSON.stringify(data));
     }
   });
+}
+
+// Update event statuses based on time
+async function updateEventStatuses() {
+  try {
+    // Update planned events to active when start_time has passed
+    const activatedResult = await pool.query(`
+      UPDATE events
+      SET status = 'active', updated_at = NOW()
+      WHERE status = 'planned' AND start_time <= NOW()
+      RETURNING id, title, 'planned' as old_status, 'active' as new_status
+    `);
+
+    // Update active events to ended when end_time has passed
+    const endedWithTimeResult = await pool.query(`
+      UPDATE events
+      SET status = 'ended', updated_at = NOW()
+      WHERE status = 'active' AND end_time IS NOT NULL AND end_time <= NOW()
+      RETURNING id, title, 'active' as old_status, 'ended' as new_status
+    `);
+
+    // Update active events to ended when no end_time and past default duration
+    const endedNoTimeResult = await pool.query(`
+      UPDATE events
+      SET status = 'ended', updated_at = NOW()
+      WHERE status = 'active'
+        AND end_time IS NULL
+        AND start_time <= NOW() - INTERVAL '${DEFAULT_EVENT_DURATION_HOURS} hours'
+      RETURNING id, title, 'active' as old_status, 'ended' as new_status
+    `);
+
+    // Combine all status changes
+    const allChanges = [
+      ...activatedResult.rows,
+      ...endedWithTimeResult.rows,
+      ...endedNoTimeResult.rows
+    ];
+
+    // Broadcast status changes
+    if (allChanges.length > 0) {
+      console.log(`⏰ Updated ${allChanges.length} event statuses`);
+
+      allChanges.forEach(change => {
+        broadcast({
+          type: 'status_update',
+          data: {
+            eventId: change.id,
+            title: change.title,
+            oldStatus: change.old_status,
+            newStatus: change.new_status,
+            timestamp: new Date().toISOString()
+          }
+        });
+      });
+    }
+  } catch (err) {
+    console.error('❌ Error updating event statuses:', err);
+  }
 }
 
 // Routes
@@ -133,13 +184,27 @@ app.post('/api/events', async (req, res) => {
 app.get('/api/causes', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT cause, COUNT(*) as count 
-      FROM events 
-      WHERE status IN ('planned', 'active') 
-      GROUP BY cause 
+      SELECT cause, COUNT(*) as count
+      FROM events
+      WHERE status IN ('planned', 'active')
+      GROUP BY cause
       ORDER BY count DESC
     `);
-    
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get data sources status
+app.get('/api/data-sources', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM data_sources
+      ORDER BY last_scraped DESC NULLS LAST
+    `);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -151,6 +216,13 @@ app.get('/api/causes', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Schedule status updates every minute
+cron.schedule('* * * * *', updateEventStatuses);
+console.log('⏰ Scheduled automatic status updates (runs every minute)');
+
+// Run initial status update on startup
+updateEventStatuses();
 
 // Start server
 app.listen(port, () => {
